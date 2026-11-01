@@ -1,4 +1,8 @@
-"""SQLite storage for artists, follower snapshots, and tweets."""
+"""SQLite storage for artists, follower snapshots, and tweets.
+
+Records passed in are plain dicts keyed by column name, so the storage does
+not depend on which API the data came from.
+"""
 
 import sqlite3
 from datetime import datetime, timezone
@@ -70,34 +74,34 @@ def connect(path):
     return conn
 
 
-def upsert_artist(conn, user, source):
-    """Insert or refresh an artist from an X API user object and log a snapshot."""
-    m = user.get("public_metrics", {})
+ARTIST_FIELDS = (
+    "id", "username", "name", "bio", "location", "url", "created_at",
+    "verified", "followers", "following", "tweet_count", "listed_count",
+    "profile_image",
+)
+TWEET_FIELDS = (
+    "id", "created_at", "text", "like_count", "retweet_count", "reply_count",
+    "quote_count", "impression_count", "has_media", "is_reply", "is_retweet",
+    "is_quote",
+)
+
+
+def upsert_artist(conn, artist, source):
+    """Insert or refresh an artist record and log a follower snapshot."""
     ts = now_iso()
+    values = [artist.get(f) for f in ARTIST_FIELDS]
+    cols = ", ".join(ARTIST_FIELDS)
+    marks = ", ".join("?" * len(ARTIST_FIELDS))
+    updates = ", ".join(
+        f"{f} = excluded.{f}" for f in ARTIST_FIELDS if f not in ("id", "created_at")
+    )
     conn.execute(
-        """
-        INSERT INTO artists (id, username, name, bio, location, url, created_at,
-            verified, followers, following, tweet_count, listed_count,
-            profile_image, source, added_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (id) DO UPDATE SET
-            username = excluded.username, name = excluded.name,
-            bio = excluded.bio, location = excluded.location,
-            url = excluded.url, verified = excluded.verified,
-            followers = excluded.followers, following = excluded.following,
-            tweet_count = excluded.tweet_count,
-            listed_count = excluded.listed_count,
-            profile_image = excluded.profile_image,
-            updated_at = excluded.updated_at
+        f"""
+        INSERT INTO artists ({cols}, source, added_at, updated_at)
+        VALUES ({marks}, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET {updates}, updated_at = excluded.updated_at
         """,
-        (
-            user["id"], user["username"], user.get("name"),
-            user.get("description"), user.get("location"), user.get("url"),
-            user.get("created_at"), int(bool(user.get("verified"))),
-            m.get("followers_count"), m.get("following_count"),
-            m.get("tweet_count"), m.get("listed_count"),
-            user.get("profile_image_url"), source, ts, ts,
-        ),
+        values + [source, ts, ts],
     )
     conn.execute(
         """
@@ -106,38 +110,24 @@ def upsert_artist(conn, user, source):
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
-            user["id"], ts, m.get("followers_count"), m.get("following_count"),
-            m.get("tweet_count"), m.get("listed_count"),
+            artist["id"], ts, artist.get("followers"), artist.get("following"),
+            artist.get("tweet_count"), artist.get("listed_count"),
         ),
     )
 
 
 def upsert_tweet(conn, artist_id, tweet):
-    m = tweet.get("public_metrics", {})
-    refs = {r["type"] for r in tweet.get("referenced_tweets", [])}
-    has_media = bool(tweet.get("attachments", {}).get("media_keys"))
+    cols = ", ".join(TWEET_FIELDS)
+    marks = ", ".join("?" * len(TWEET_FIELDS))
     conn.execute(
-        """
-        INSERT OR REPLACE INTO tweets (id, artist_id, created_at, text,
-            like_count, retweet_count, reply_count, quote_count,
-            impression_count, has_media, is_reply, is_retweet, is_quote,
-            fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT OR REPLACE INTO tweets ({cols}, artist_id, fetched_at)
+        VALUES ({marks}, ?, ?)
         """,
-        (
-            tweet["id"], artist_id, tweet.get("created_at"), tweet.get("text"),
-            m.get("like_count"), m.get("retweet_count"), m.get("reply_count"),
-            m.get("quote_count"), m.get("impression_count"), int(has_media),
-            int("replied_to" in refs), int("retweeted" in refs),
-            int("quoted" in refs), now_iso(),
-        ),
+        [tweet.get(f) for f in TWEET_FIELDS] + [artist_id, now_iso()],
     )
 
 
-def newest_tweet_id(conn, artist_id):
-    row = conn.execute(
-        "SELECT id FROM tweets WHERE artist_id = ? "
-        "ORDER BY CAST(id AS INTEGER) DESC LIMIT 1",
-        (artist_id,),
-    ).fetchone()
-    return row["id"] if row else None
+def tweet_exists(conn, tweet_id):
+    row = conn.execute("SELECT 1 FROM tweets WHERE id = ?", (tweet_id,)).fetchone()
+    return row is not None
