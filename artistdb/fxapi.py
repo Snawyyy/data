@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 BASE = "https://api.fxtwitter.com"
 USER_AGENT = "artistdb/0.1 (research)"
-RETRIES = 4
+RETRIES = 6
 DELAY = 0.5  # seconds between requests, to stay polite
 
 
@@ -76,18 +76,20 @@ def tweet_record(status):
 
 class FxClient:
     def _get(self, path, params=None):
-        """GET a JSON endpoint. FxTwitter returns spurious 404s now and then,
-        so 404, 429, and 5xx are retried with backoff."""
+        """GET a JSON endpoint. FxTwitter often answers a valid request with a
+        spurious 404 or a non-JSON body, so those, 429, and 5xx are retried."""
         url = BASE + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         last = None
         for attempt in range(RETRIES):
-            time.sleep(DELAY * (2 ** attempt))
+            time.sleep(DELAY * (attempt + 1))
             try:
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     return json.load(resp)
+            except json.JSONDecodeError:
+                last = "bad JSON"
             except urllib.error.HTTPError as e:
                 last = e.code
                 is_retryable = e.code in (404, 429) or e.code >= 500
