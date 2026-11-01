@@ -86,7 +86,7 @@ class FxClient:
         for attempt in range(RETRIES):
             time.sleep(DELAY * (attempt + 1))
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=15) as resp:
                     return json.load(resp)
             except json.JSONDecodeError:
                 last = "bad JSON"
