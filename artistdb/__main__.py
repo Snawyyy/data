@@ -4,7 +4,7 @@ import argparse
 import re
 import sys
 
-from . import db
+from . import db, wikidata
 from .fxapi import FxApiError, FxClient, artist_record, tweet_record
 
 DEFAULT_DB = "artists.db"
@@ -93,33 +93,103 @@ def shared_authors(status):
         yield quote["author"]
 
 
-def cmd_discover(conn, client, args):
-    """Snowball: look through known artists' timelines for artists they
-    repost or quote, and add the ones that look like big artists."""
-    bio_re = re.compile(args.bio_match, re.IGNORECASE)
-    known = {r["id"] for r in conn.execute("SELECT id FROM artists")}
-    sources = conn.execute(
-        "SELECT username FROM artists WHERE followers >= ? ORDER BY random()",
-        (args.from_min_followers,),
-    ).fetchall()
-    added = 0
-    for row in sources[: args.max_sources]:
+class Scanner:
+    """Crawls outward from known artists to find new ones.
+
+    Each step either expands one artist (reads who they follow and whom they
+    repost or quote) or checks one queued handle from Wikidata. The two
+    alternate so the crawl does not stay inside one artist's circle. When the
+    queue has never been filled, it is filled from Wikidata.
+    """
+
+    def __init__(self, conn, client, args):
+        self.conn = conn
+        self.client = client
+        self.args = args
+        self.bio_re = re.compile(args.bio_match, re.IGNORECASE)
+        self.known = db.artist_ids(conn)
+        self.added = 0
+
+    def looks_like_artist(self, user):
+        is_big = (user.get("followers") or 0) >= self.args.min_followers
+        is_public = not user.get("protected")
+        has_art_bio = bool(self.bio_re.search(user.get("description") or ""))
+        return is_big and is_public and has_art_bio
+
+    def accept(self, user, source, via):
+        if user["id"] in self.known or not self.looks_like_artist(user):
+            return
+        self.known.add(user["id"])
+        db.upsert_artist(self.conn, artist_record(user), source=source, found_via=via)
+        self.added += 1
+        print(f"+ @{user['screen_name']} ({user['followers']}) {source} of @{via}")
+
+    def expand(self, row):
+        name = row["username"]
         try:
-            for status in client.statuses(row["username"], limit=args.limit):
+            for user in self.client.following(name, limit=self.args.following_limit):
+                self.accept(user, "following", name)
+            for status in self.client.statuses(name, limit=self.args.posts_limit):
                 for user in shared_authors(status):
-                    if user["id"] in known:
-                        continue
-                    known.add(user["id"])
-                    is_big = (user.get("followers") or 0) >= args.min_followers
-                    is_artist = bool(bio_re.search(user.get("description") or ""))
-                    if is_big and is_artist:
-                        db.upsert_artist(conn, artist_record(user), source="repost")
-                        added += 1
-                        print(f"+ @{user['screen_name']} ({user['followers']}) via @{row['username']}")
+                    self.accept(user, "repost", name)
         except FxApiError as e:
-            print(f"@{row['username']}: stopped early, {e}", file=sys.stderr)
-        conn.commit()
-    print(f"added {added} artists from {min(len(sources), args.max_sources)} timelines")
+            print(f"@{name}: stopped early, {e}", file=sys.stderr)
+        db.mark_expanded(self.conn, row["id"])
+
+    def check_candidate(self, name):
+        artist = self.client.user(name)
+        if artist is None:
+            db.set_candidate_status(self.conn, name, "missing")
+            return
+        user = {
+            "id": artist["id"], "screen_name": artist["username"],
+            "followers": artist["followers"], "description": artist["bio"],
+        }
+        if not self.looks_like_artist(user):
+            db.set_candidate_status(self.conn, name, "rejected")
+            return
+        db.upsert_artist(self.conn, artist, source="wikidata")
+        db.set_candidate_status(self.conn, name, "accepted")
+        if artist["id"] not in self.known:
+            self.known.add(artist["id"])
+            self.added += 1
+            print(f"+ @{artist['username']} ({artist['followers']}) wikidata")
+
+    def bootstrap(self):
+        print("filling queue from Wikidata...")
+        n = db.add_candidates(self.conn, wikidata.artist_handles(), "wikidata")
+        print(f"queued {n} handles")
+
+    def step(self, turn):
+        """Do one unit of work. Returns False when nothing is left."""
+        row = db.next_unexpanded(self.conn)
+        pending = db.pending_candidates(self.conn, 1)
+        prefer_queue = turn % 2 == 1
+        if pending and (prefer_queue or row is None):
+            self.check_candidate(pending[0])
+        elif row is not None:
+            self.expand(row)
+        elif not db.has_candidates(self.conn):
+            self.bootstrap()
+        else:
+            return False
+        self.conn.commit()
+        return True
+
+    def run(self):
+        turn = 0
+        while self.args.max_artists == 0 or len(self.known) < self.args.max_artists:
+            if self.args.max_steps and turn >= self.args.max_steps:
+                break
+            if not self.step(turn):
+                print("nothing left to scan")
+                break
+            turn += 1
+        print(f"added {self.added} artists, {len(self.known)} total")
+
+
+def cmd_scan(conn, client, args):
+    Scanner(conn, client, args).run()
 
 
 def cmd_origin(conn, client, args):
@@ -150,17 +220,20 @@ def build_parser():
     s.add_argument("file")
     s.set_defaults(func=cmd_seed)
 
-    s = sub.add_parser("discover", help="find artists that known artists repost or quote")
+    s = sub.add_parser("scan", help="crawl X for artists, starting from Wikidata")
     s.add_argument("--min-followers", type=int, default=10000,
-                   help="only add artists at least this big")
-    s.add_argument("--from-min-followers", type=int, default=0,
-                   help="only scan timelines of artists at least this big")
-    s.add_argument("--max-sources", type=int, default=50,
-                   help="timelines to scan per run")
-    s.add_argument("--limit", type=int, default=100, help="posts to scan per timeline")
+                   help="only keep artists at least this big")
+    s.add_argument("--max-artists", type=int, default=0,
+                   help="stop at this many artists (0 = no limit)")
+    s.add_argument("--max-steps", type=int, default=0,
+                   help="stop after this many steps (0 = no limit)")
+    s.add_argument("--following-limit", type=int, default=400,
+                   help="accounts to read from each following list")
+    s.add_argument("--posts-limit", type=int, default=100,
+                   help="posts to scan per artist for reposts and quotes")
     s.add_argument("--bio-match", default=ART_BIO,
                    help="regex a bio must match to count as an artist")
-    s.set_defaults(func=cmd_discover)
+    s.set_defaults(func=cmd_scan)
 
     s = sub.add_parser("refresh", help="re-fetch all profiles and log snapshots")
     s.set_defaults(func=cmd_refresh)
