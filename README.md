@@ -6,11 +6,8 @@ audience over from another platform.
 
 ## Setup
 
-Needs Python 3.10+ and an X API bearer token (paid developer account).
-
-```bash
-export X_BEARER_TOKEN=...
-```
+Needs Python 3.10+. Data comes from the public FxTwitter API
+(api.fxtwitter.com), so no X account or token is needed.
 
 ## Usage
 
@@ -18,8 +15,8 @@ export X_BEARER_TOKEN=...
 # import usernames, one per line or first CSV column
 python -m artistdb seed seeds.txt
 
-# find artists posting art in the last 7 days with 10k+ followers
-python -m artistdb discover --min-followers 10000 --limit 1000
+# grow the list: add 10k+ follower artists that known artists repost or quote
+python -m artistdb discover --min-followers 10000 --max-sources 50
 
 # re-fetch every profile; each run logs a follower snapshot
 python -m artistdb refresh
@@ -37,8 +34,12 @@ Data goes to `artists.db` (change with `--db`).
 
 ## Limits to know
 
-- X only returns about the newest 3200 tweets per user, so very active artists
-  lose their early history.
-- X gives current follower counts only. Growth over time comes from running
+- FxTwitter has no search, so new artists come only from a seed list and from
+  who known artists repost or quote. Start with a good seed list.
+- Discovery keeps accounts whose bio looks like an artist's (see `--bio-match`).
+  Some studios and fan accounts still slip through; review them.
+- FxTwitter randomly fails about half its requests; the client retries, so
+  runs are slow (about 1 to 3 seconds per request).
+- Timelines only go back so far, so very active artists lose early history.
+- Follower counts are current only. Growth over time comes from running
   `refresh` regularly and from engagement on old tweets.
-- Recent search covers only the last 7 days.
