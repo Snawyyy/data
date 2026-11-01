@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
     following       INTEGER,
     tweet_count     INTEGER,
     listed_count    INTEGER,
+    -- live: fetched now; wayback: read from an archived profile page
+    source          TEXT NOT NULL DEFAULT 'live',
     PRIMARY KEY (artist_id, taken_at)
 );
 
@@ -63,6 +65,21 @@ CREATE TABLE IF NOT EXISTS tweets (
 );
 CREATE INDEX IF NOT EXISTS tweets_artist_time ON tweets (artist_id, created_at);
 
+-- detected blow-up windows, one row per artist per method
+CREATE TABLE IF NOT EXISTS blowups (
+    artist_id       TEXT NOT NULL REFERENCES artists (id),
+    method          TEXT NOT NULL CHECK (method IN ('followers', 'engagement')),
+    start_at        TEXT,
+    end_at          TEXT,
+    before_value    REAL,
+    after_value     REAL,
+    multiplier      REAL,
+    trigger_tweet_id TEXT,
+    trigger_ratio   REAL,
+    computed_at     TEXT NOT NULL,
+    PRIMARY KEY (artist_id, method)
+);
+
 -- handles known only by name (e.g. from Wikidata), waiting to be looked up
 CREATE TABLE IF NOT EXISTS candidates (
     username        TEXT PRIMARY KEY COLLATE NOCASE,
@@ -75,7 +92,10 @@ CREATE TABLE IF NOT EXISTS candidates (
 """
 
 # columns added after the first schema, for databases made before them
-LATE_COLUMNS = {"artists": ("found_via TEXT", "expanded_at TEXT")}
+LATE_COLUMNS = {
+    "artists": ("found_via TEXT", "expanded_at TEXT"),
+    "snapshots": ("source TEXT NOT NULL DEFAULT 'live'",),
+}
 
 
 def now_iso():
@@ -199,4 +219,53 @@ def set_candidate_status(conn, username, status):
     conn.execute(
         "UPDATE candidates SET status = ?, checked_at = ? WHERE username = ?",
         (status, now_iso(), username),
+    )
+
+
+def add_wayback_snapshot(conn, artist_id, taken_at, followers):
+    conn.execute(
+        "INSERT OR REPLACE INTO snapshots (artist_id, taken_at, followers, source) "
+        "VALUES (?, ?, ?, 'wayback')",
+        (artist_id, taken_at, followers),
+    )
+
+
+def follower_history(conn, artist_id):
+    """(taken_at, followers) pairs from all sources, oldest first."""
+    return [
+        (r["taken_at"], r["followers"])
+        for r in conn.execute(
+            "SELECT taken_at, followers FROM snapshots "
+            "WHERE artist_id = ? AND followers IS NOT NULL ORDER BY taken_at",
+            (artist_id,),
+        )
+    ]
+
+
+def own_posts(conn, artist_id):
+    """(created_at, likes, tweet_id) for original posts, oldest first."""
+    return [
+        (r["created_at"], r["like_count"], r["id"])
+        for r in conn.execute(
+            "SELECT id, created_at, like_count FROM tweets WHERE artist_id = ? "
+            "AND is_reply = 0 AND is_retweet = 0 AND like_count IS NOT NULL "
+            "ORDER BY created_at",
+            (artist_id,),
+        )
+    ]
+
+
+def save_blowup(conn, artist_id, method, result):
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO blowups (artist_id, method, start_at, end_at,
+            before_value, after_value, multiplier, trigger_tweet_id,
+            trigger_ratio, computed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            artist_id, method, result["start_at"], result["end_at"],
+            result["before"], result["after"], result["multiplier"],
+            result.get("trigger_tweet_id"), result.get("trigger_ratio"), now_iso(),
+        ),
     )
