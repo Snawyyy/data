@@ -124,3 +124,18 @@ class FxClient:
             if not cursor or not results:
                 return
             params["cursor"] = cursor
+
+    def following(self, username, limit=500):
+        """Yield raw user objects for accounts this user follows."""
+        path = f"/2/profile/{urllib.parse.quote(username)}/following"
+        params = {}
+        got = 0
+        while got < limit:
+            data = self._get(path, params)
+            results = data.get("results") or []
+            yield from results
+            got += len(results)
+            cursor = (data.get("cursor") or {}).get("bottom")
+            if not cursor or not results:
+                return
+            params["cursor"] = cursor
