@@ -4,7 +4,7 @@ import argparse
 import re
 import sys
 
-from . import db, wikidata
+from . import blowup, db, wayback, wikidata
 from .fxapi import FxApiError, FxClient, artist_record, tweet_record
 
 DEFAULT_DB = "artists.db"
@@ -192,6 +192,71 @@ def cmd_scan(conn, client, args):
     Scanner(conn, client, args).run()
 
 
+def artists_to_process(conn, args):
+    """Artists picked by --user or by --min-followers, biggest first."""
+    if args.user:
+        return conn.execute(
+            "SELECT id, username FROM artists WHERE lower(username) = lower(?)",
+            (args.user.lstrip("@"),),
+        ).fetchall()
+    return conn.execute(
+        "SELECT id, username FROM artists WHERE followers >= ? ORDER BY followers DESC",
+        (args.min_followers,),
+    ).fetchall()
+
+
+def has_wayback(conn, artist_id):
+    row = conn.execute(
+        "SELECT 1 FROM snapshots WHERE artist_id = ? AND source = 'wayback' LIMIT 1",
+        (artist_id,),
+    ).fetchone()
+    return row is not None
+
+
+def cmd_history(conn, client, args):
+    for row in artists_to_process(conn, args):
+        if has_wayback(conn, row["id"]) and not args.redo:
+            continue
+        n = 0
+        for taken_at, followers in wayback.follower_history(
+            row["username"], max_pages=args.max_pages
+        ):
+            db.add_wayback_snapshot(conn, row["id"], taken_at, followers)
+            n += 1
+        conn.commit()
+        print(f"@{row['username']}: {n} archived follower counts")
+
+
+def _fmt(n):
+    if n is None:
+        return "?"
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}k" if n >= 1e3 else f"{n:.0f}"
+
+
+def cmd_blowup(conn, client, args):
+    for row in artists_to_process(conn, args):
+        fol = blowup.from_followers(db.follower_history(conn, row["id"]))
+        eng = blowup.from_engagement(db.own_posts(conn, row["id"]))
+        conn.execute("DELETE FROM blowups WHERE artist_id = ?", (row["id"],))
+        parts = []
+        if fol:
+            db.save_blowup(conn, row["id"], "followers", fol)
+            parts.append(
+                f"followers {_fmt(fol['before'])} -> {_fmt(fol['after'])} "
+                f"between {fol['start_at'][:7]} and {fol['end_at'][:7]}"
+            )
+        if eng:
+            db.save_blowup(conn, row["id"], "engagement", eng)
+            url = f"https://x.com/{row['username']}/status/{eng['trigger_tweet_id']}"
+            parts.append(
+                f"likes {_fmt(eng['before'])} -> {_fmt(eng['after'])} from "
+                f"{eng['start_at']}, trigger {url} ({eng['trigger_ratio']}x)"
+            )
+        if parts or args.user:
+            print(f"@{row['username']}: " + ("; ".join(parts) or "no clear blow-up"))
+    conn.commit()
+
+
 def cmd_origin(conn, client, args):
     cur = conn.execute(
         "UPDATE artists SET origin = ?, origin_notes = ? "
@@ -249,6 +314,19 @@ def build_parser():
     s.add_argument("origin", choices=["native", "migrated", "unknown"])
     s.add_argument("--notes")
     s.set_defaults(func=cmd_origin)
+
+    s = sub.add_parser("history", help="read old follower counts from the Wayback Machine")
+    s.add_argument("--user", help="only this artist")
+    s.add_argument("--min-followers", type=int, default=0)
+    s.add_argument("--max-pages", type=int, default=40,
+                   help="archived pages to read per artist")
+    s.add_argument("--redo", action="store_true", help="refetch artists already done")
+    s.set_defaults(func=cmd_history)
+
+    s = sub.add_parser("blowup", help="find when each artist blew up")
+    s.add_argument("--user", help="only this artist")
+    s.add_argument("--min-followers", type=int, default=0)
+    s.set_defaults(func=cmd_blowup)
 
     s = sub.add_parser("stats", help="show database counts")
     s.set_defaults(func=cmd_stats)
