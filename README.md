@@ -12,11 +12,12 @@ Needs Python 3.10+. Data comes from the public FxTwitter API
 ## Usage
 
 ```bash
-# import usernames, one per line or first CSV column
-python -m artistdb seed seeds.txt
+# find artists on its own: starts from artists listed on Wikidata, then
+# crawls who each artist follows and reposts. Ctrl-C any time; rerun resumes.
+python -m artistdb scan --min-followers 10000
 
-# grow the list: add 10k+ follower artists that known artists repost or quote
-python -m artistdb discover --min-followers 10000 --max-sources 50
+# optional: add specific usernames, one per line or first CSV column
+python -m artistdb seed seeds.txt
 
 # re-fetch every profile; each run logs a follower snapshot
 python -m artistdb refresh
@@ -34,9 +35,10 @@ Data goes to `artists.db` (change with `--db`).
 
 ## Limits to know
 
-- FxTwitter has no search, so new artists come only from a seed list and from
-  who known artists repost or quote. Start with a good seed list.
-- Discovery keeps accounts whose bio looks like an artist's (see `--bio-match`).
+- FxTwitter has no search, so the scan starts from about 7,600 artist handles on
+  Wikidata and grows through following lists and reposts. It finds artists
+  connected to others, so isolated ones can be missed.
+- The scan keeps accounts whose bio looks like an artist's (see `--bio-match`).
   Some studios and fan accounts still slip through; review them.
 - FxTwitter randomly fails about half its requests; the client retries, so
   runs are slow (about 1 to 3 seconds per request).
