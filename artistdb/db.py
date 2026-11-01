@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS artists (
                     CHECK (origin IN ('native', 'migrated', 'unknown')),
     origin_notes    TEXT,
     source          TEXT,
+    found_via       TEXT,
+    -- when this artist's following list and reposts were last crawled
+    expanded_at     TEXT,
     added_at        TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -59,7 +62,20 @@ CREATE TABLE IF NOT EXISTS tweets (
     fetched_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tweets_artist_time ON tweets (artist_id, created_at);
+
+-- handles known only by name (e.g. from Wikidata), waiting to be looked up
+CREATE TABLE IF NOT EXISTS candidates (
+    username        TEXT PRIMARY KEY COLLATE NOCASE,
+    source          TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'accepted', 'rejected', 'missing')),
+    added_at        TEXT NOT NULL,
+    checked_at      TEXT
+);
 """
+
+# columns added after the first schema, for databases made before them
+LATE_COLUMNS = {"artists": ("found_via TEXT", "expanded_at TEXT")}
 
 
 def now_iso():
@@ -71,6 +87,11 @@ def connect(path):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    for table, cols in LATE_COLUMNS.items():
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col in cols:
+            if col.split()[0] not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
     return conn
 
 
@@ -86,7 +107,7 @@ TWEET_FIELDS = (
 )
 
 
-def upsert_artist(conn, artist, source):
+def upsert_artist(conn, artist, source, found_via=None):
     """Insert or refresh an artist record and log a follower snapshot."""
     ts = now_iso()
     values = [artist.get(f) for f in ARTIST_FIELDS]
@@ -97,11 +118,11 @@ def upsert_artist(conn, artist, source):
     )
     conn.execute(
         f"""
-        INSERT INTO artists ({cols}, source, added_at, updated_at)
-        VALUES ({marks}, ?, ?, ?)
+        INSERT INTO artists ({cols}, source, found_via, added_at, updated_at)
+        VALUES ({marks}, ?, ?, ?, ?)
         ON CONFLICT (id) DO UPDATE SET {updates}, updated_at = excluded.updated_at
         """,
-        values + [source, ts, ts],
+        values + [source, found_via, ts, ts],
     )
     conn.execute(
         """
@@ -131,3 +152,51 @@ def upsert_tweet(conn, artist_id, tweet):
 def tweet_exists(conn, tweet_id):
     row = conn.execute("SELECT 1 FROM tweets WHERE id = ?", (tweet_id,)).fetchone()
     return row is not None
+
+
+def artist_ids(conn):
+    return {r["id"] for r in conn.execute("SELECT id FROM artists")}
+
+
+def next_unexpanded(conn):
+    """Biggest artist whose network has not been crawled yet."""
+    return conn.execute(
+        "SELECT id, username FROM artists WHERE expanded_at IS NULL "
+        "ORDER BY followers DESC LIMIT 1"
+    ).fetchone()
+
+
+def mark_expanded(conn, artist_id):
+    conn.execute(
+        "UPDATE artists SET expanded_at = ? WHERE id = ?", (now_iso(), artist_id)
+    )
+
+
+def add_candidates(conn, usernames, source):
+    ts = now_iso()
+    before = conn.total_changes
+    conn.executemany(
+        "INSERT OR IGNORE INTO candidates (username, source, added_at) VALUES (?, ?, ?)",
+        [(u, source, ts) for u in usernames],
+    )
+    return conn.total_changes - before
+
+
+def pending_candidates(conn, n):
+    return [
+        r["username"]
+        for r in conn.execute(
+            "SELECT username FROM candidates WHERE status = 'pending' LIMIT ?", (n,)
+        )
+    ]
+
+
+def has_candidates(conn):
+    return conn.execute("SELECT 1 FROM candidates LIMIT 1").fetchone() is not None
+
+
+def set_candidate_status(conn, username, status):
+    conn.execute(
+        "UPDATE candidates SET status = ?, checked_at = ? WHERE username = ?",
+        (status, now_iso(), username),
+    )
