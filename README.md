@@ -25,6 +25,13 @@ python -m artistdb refresh
 # pull timelines (only new tweets after the first run)
 python -m artistdb tweets --min-followers 10000
 
+# old follower counts from archived profile pages on the Wayback Machine
+python -m artistdb history --min-followers 10000
+
+# find when each artist blew up (use --user @name for one artist);
+# pull full timelines first with: python -m artistdb tweets --full
+python -m artistdb blowup
+
 # mark whether an artist grew on X or moved from elsewhere
 python -m artistdb origin @someartist native --notes "first post 2019, 40 followers"
 
@@ -32,6 +39,16 @@ python -m artistdb stats
 ```
 
 Data goes to `artists.db` (change with `--db`).
+
+## How blow-ups are found
+
+Two signals, stored in the `blowups` table:
+
+- **followers**: in the follower history (live snapshots plus Wayback
+  archives), the stretch with the fastest growth relative to size.
+- **engagement**: the first month where median likes on the artist's own posts
+  reach 5x their earlier 6-month level and stay at 3x for the next 3 months.
+  The most liked post in the 60 days before is saved as the likely trigger.
 
 ## Limits to know
 
@@ -43,5 +60,5 @@ Data goes to `artists.db` (change with `--db`).
 - FxTwitter randomly fails about half its requests; the client retries, so
   runs are slow (about 1 to 3 seconds per request).
 - Timelines only go back so far, so very active artists lose early history.
-- Follower counts are current only. Growth over time comes from running
-  `refresh` regularly and from engagement on old tweets.
+- Wayback archives carry follower counts mostly before 2020; later years lean
+  on engagement and on running `refresh` regularly.
