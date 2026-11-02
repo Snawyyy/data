@@ -18,7 +18,9 @@ import math
 from datetime import datetime
 from statistics import median
 
-MIN_BASE_FOLLOWERS = 500     # ignore growth from a near-empty account
+MIN_BASE_FOLLOWERS = 50      # ignore growth from a near-empty account
+SMALL_START_FOLLOWERS = 5000 # starting under this, the take-off was captured
+MAX_PRECISE_DAYS = 365       # a longer follower window pinpoints nothing
 MIN_GAP_DAYS = 20            # skip snapshot pairs too close to measure
 MIN_FOLLOWER_MULT = 1.5      # a blow-up must at least add half again
 WINDOW_KEEP = 0.5            # extend the window over segments this fast
@@ -72,6 +74,8 @@ def from_followers(history):
         "before": f_start,
         "after": f_end,
         "multiplier": round(mult, 2),
+        "cut_off": lo == 0 and f_start >= SMALL_START_FOLLOWERS,
+        "coarse": (t_end - t_start).days > MAX_PRECISE_DAYS,
     }
 
 
