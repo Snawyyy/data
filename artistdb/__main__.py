@@ -3,6 +3,7 @@
 import argparse
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import blowup, db, wayback, wikidata
 from .fxapi import FxApiError, FxClient, artist_record, tweet_record
@@ -213,47 +214,83 @@ def has_wayback(conn, artist_id):
     return row is not None
 
 
-def cmd_history(conn, client, args):
-    for row in artists_to_process(conn, args):
-        if has_wayback(conn, row["id"]) and not args.redo:
-            continue
-        n = 0
-        for taken_at, followers in wayback.follower_history(
-            row["username"], max_pages=args.max_pages
-        ):
-            db.add_wayback_snapshot(conn, row["id"], taken_at, followers)
-            n += 1
-        conn.commit()
-        print(f"@{row['username']}: {n} archived follower counts")
-
-
 def _fmt(n):
     if n is None:
         return "?"
     return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}k" if n >= 1e3 else f"{n:.0f}"
 
 
+def analyze_artist(conn, artist_id, username, always_print=False):
+    """Detect and save one artist's blow-up, and print it."""
+    fol = blowup.from_followers(db.follower_history(conn, artist_id))
+    eng = blowup.from_engagement(db.own_posts(conn, artist_id))
+    conn.execute("DELETE FROM blowups WHERE artist_id = ?", (artist_id,))
+    parts = []
+    if fol:
+        db.save_blowup(conn, artist_id, "followers", fol)
+        parts.append(
+            f"followers {_fmt(fol['before'])} -> {_fmt(fol['after'])} "
+            f"between {fol['start_at'][:7]} and {fol['end_at'][:7]}"
+        )
+    if eng:
+        db.save_blowup(conn, artist_id, "engagement", eng)
+        url = f"https://x.com/{username}/status/{eng['trigger_tweet_id']}"
+        parts.append(
+            f"likes {_fmt(eng['before'])} -> {_fmt(eng['after'])} from "
+            f"{eng['start_at']}, trigger {url} ({eng['trigger_ratio']}x)"
+        )
+    if parts or always_print:
+        print(f"@{username}: " + ("; ".join(parts) or "no clear blow-up"))
+
+
+def cmd_history(conn, client, args):
+    """Workers only fetch; this thread alone writes to the database. Every
+    --batch finished artists it runs blow-up detection while the rest load."""
+    todo = [
+        (row["id"], row["username"])
+        for row in artists_to_process(conn, args)
+        if args.redo or not has_wayback(conn, row["id"])
+    ]
+    pool = ThreadPoolExecutor(max_workers=args.workers)
+    futures = {
+        pool.submit(
+            lambda name: list(wayback.follower_history(name, max_pages=args.max_pages)),
+            username,
+        ): (artist_id, username)
+        for artist_id, username in todo
+    }
+    batch = []
+    done = 0
+
+    def finish_batch():
+        print(f"=== batch done: {done} of {len(todo)} artists")
+        for artist_id, username in batch:
+            analyze_artist(conn, artist_id, username, always_print=True)
+        conn.commit()
+        print("=== batch end", flush=True)
+        batch.clear()
+
+    try:
+        for future in as_completed(futures):
+            artist_id, username = futures[future]
+            points = future.result()
+            for taken_at, followers in points:
+                db.add_wayback_snapshot(conn, artist_id, taken_at, followers)
+            conn.commit()
+            done += 1
+            print(f"@{username}: {len(points)} archived follower counts")
+            batch.append((artist_id, username))
+            if len(batch) >= args.batch:
+                finish_batch()
+        if batch:
+            finish_batch()
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def cmd_blowup(conn, client, args):
     for row in artists_to_process(conn, args):
-        fol = blowup.from_followers(db.follower_history(conn, row["id"]))
-        eng = blowup.from_engagement(db.own_posts(conn, row["id"]))
-        conn.execute("DELETE FROM blowups WHERE artist_id = ?", (row["id"],))
-        parts = []
-        if fol:
-            db.save_blowup(conn, row["id"], "followers", fol)
-            parts.append(
-                f"followers {_fmt(fol['before'])} -> {_fmt(fol['after'])} "
-                f"between {fol['start_at'][:7]} and {fol['end_at'][:7]}"
-            )
-        if eng:
-            db.save_blowup(conn, row["id"], "engagement", eng)
-            url = f"https://x.com/{row['username']}/status/{eng['trigger_tweet_id']}"
-            parts.append(
-                f"likes {_fmt(eng['before'])} -> {_fmt(eng['after'])} from "
-                f"{eng['start_at']}, trigger {url} ({eng['trigger_ratio']}x)"
-            )
-        if parts or args.user:
-            print(f"@{row['username']}: " + ("; ".join(parts) or "no clear blow-up"))
+        analyze_artist(conn, row["id"], row["username"], always_print=bool(args.user))
     conn.commit()
 
 
@@ -321,6 +358,10 @@ def build_parser():
     s.add_argument("--max-pages", type=int, default=40,
                    help="archived pages to read per artist")
     s.add_argument("--redo", action="store_true", help="refetch artists already done")
+    s.add_argument("--workers", type=int, default=3,
+                   help="artists fetched at once; archive.org throttles above a few")
+    s.add_argument("--batch", type=int, default=10,
+                   help="run blow-up detection every this many finished artists")
     s.set_defaults(func=cmd_history)
 
     s = sub.add_parser("blowup", help="find when each artist blew up")
