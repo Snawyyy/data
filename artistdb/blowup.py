@@ -6,8 +6,12 @@ Two independent signals:
   artist's earlier level and stay there, plus the post most likely to have
   set it off.
 
-Both return a dict with start_at, end_at, before, after, multiplier (and
-trigger fields for engagement), or None when there is no clear blow-up.
+Both return a dict with start_at, end_at, before, after, multiplier and
+cut_off (plus coarse for followers and trigger fields for engagement), or None
+when there is no clear blow-up.
+
+cut_off means the data starts too late to be sure this was the real take-off.
+coarse means the follower window is too long to pinpoint anything.
 """
 
 import math
@@ -22,6 +26,8 @@ WINDOW_KEEP = 0.5            # extend the window over segments this fast
 BASELINE_MONTHS = 6
 MIN_BASELINE_POSTS = 5
 JUMP_RATIO = 5.0             # breakout month median vs baseline
+MIN_AFTER_LIKES = 100        # below this a jump is noise, not a blow-up
+MISSING_HISTORY_DAYS = 365   # first stored post this long after joining: cut off
 SUSTAIN_MONTHS = 3
 SUSTAIN_RATIO = 3.0          # following months must hold this level
 TRIGGER_LOOKBACK_DAYS = 60
@@ -77,8 +83,9 @@ def _month_iso(m):
     return f"{m // 12:04d}-{m % 12 + 1:02d}"
 
 
-def from_engagement(posts):
-    """posts: [(iso_time, likes, tweet_id)] original posts, oldest first."""
+def from_engagement(posts, joined=None):
+    """posts: [(iso_time, likes, tweet_id)] original posts, oldest first.
+    joined: iso time the account was created, used to spot missing early posts."""
     rows = [(_dt(t), likes, tid) for t, likes, tid in posts if t]
     by_month = {}
     for dt, likes, tid in rows:
@@ -101,16 +108,17 @@ def from_engagement(posts):
         baseline = max(median(base_likes), 1)
         jumped = median(month_likes) >= JUMP_RATIO * baseline
         held = median(later) >= SUSTAIN_RATIO * baseline
-        if not (jumped and held):
+        after = median(likes_in(m, m + SUSTAIN_MONTHS))
+        if not (jumped and held) or after < MIN_AFTER_LIKES:
             continue
 
-        after = median(likes_in(m, m + SUSTAIN_MONTHS))
         month_end = max(dt for dt, _, _ in by_month[m])
         window = [
             r for r in rows
             if 0 <= (month_end - r[0]).days <= TRIGGER_LOOKBACK_DAYS
         ]
         trigger = max(window, key=lambda r: r[1])
+        history_gap = (rows[0][0] - _dt(joined)).days if joined else 0
         return {
             "start_at": _month_iso(m),
             "end_at": _month_iso(m + SUSTAIN_MONTHS),
@@ -119,5 +127,6 @@ def from_engagement(posts):
             "multiplier": round(after / baseline, 2),
             "trigger_tweet_id": trigger[2],
             "trigger_ratio": round(trigger[1] / baseline, 1),
+            "cut_off": history_gap > MISSING_HISTORY_DAYS,
         }
     return None
