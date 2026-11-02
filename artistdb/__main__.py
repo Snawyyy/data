@@ -5,7 +5,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import blowup, db, wayback, wikidata
+from . import blowup, db, report, wayback, wikidata
 from .fxapi import FxApiError, FxClient, artist_record, tweet_record
 
 DEFAULT_DB = "artists.db"
@@ -303,6 +303,13 @@ def cmd_blowup(conn, client, args):
     conn.commit()
 
 
+def cmd_report(conn, client, args):
+    page = report.build(conn, min_followers=args.min_followers)
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write(page)
+    print(f"wrote {args.out}")
+
+
 def cmd_origin(conn, client, args):
     cur = conn.execute(
         "UPDATE artists SET origin = ?, origin_notes = ? "
@@ -377,6 +384,11 @@ def build_parser():
     s.add_argument("--user", help="only this artist")
     s.add_argument("--min-followers", type=int, default=0)
     s.set_defaults(func=cmd_blowup)
+
+    s = sub.add_parser("report", help="build the HTML report from saved blow-ups")
+    s.add_argument("--min-followers", type=int, default=0)
+    s.add_argument("--out", default="report.html")
+    s.set_defaults(func=cmd_report)
 
     s = sub.add_parser("stats", help="show database counts")
     s.set_defaults(func=cmd_stats)

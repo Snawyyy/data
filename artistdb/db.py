@@ -291,3 +291,25 @@ def save_blowup(conn, artist_id, method, result):
             now_iso(),
         ),
     )
+
+
+def report_artists(conn, min_followers):
+    return conn.execute(
+        "SELECT id, username, followers, created_at FROM artists WHERE followers >= ?",
+        (min_followers,),
+    ).fetchall()
+
+
+def blowups_for(conn, artist_id):
+    """Saved blow-ups for one artist, keyed by method, in detector field names."""
+    results = {}
+    for r in conn.execute("SELECT * FROM blowups WHERE artist_id = ?", (artist_id,)):
+        results[r["method"]] = {
+            "start_at": r["start_at"], "end_at": r["end_at"],
+            "before": r["before_value"], "after": r["after_value"],
+            "multiplier": r["multiplier"],
+            "trigger_tweet_id": r["trigger_tweet_id"],
+            "trigger_ratio": r["trigger_ratio"],
+            "cut_off": bool(r["cut_off"]), "coarse": bool(r["coarse"]),
+        }
+    return results
