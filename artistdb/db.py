@@ -115,12 +115,17 @@ def connect(path):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    migrate(conn)
+    return conn
+
+
+def migrate(conn):
+    """Add columns that a database made by an older version is missing."""
     for table, cols in LATE_COLUMNS.items():
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         for col in cols:
             if col.split()[0] not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
-    return conn
 
 
 ARTIST_FIELDS = (
