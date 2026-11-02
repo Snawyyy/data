@@ -220,10 +220,17 @@ def _fmt(n):
     return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.1f}k" if n >= 1e3 else f"{n:.0f}"
 
 
+def _flags(result):
+    names = [f for f in ("cut_off", "coarse") if result.get(f)]
+    return f" [{', '.join(names)}]" if names else ""
+
+
 def analyze_artist(conn, artist_id, username, always_print=False):
     """Detect and save one artist's blow-up, and print it."""
     fol = blowup.from_followers(db.follower_history(conn, artist_id))
-    eng = blowup.from_engagement(db.own_posts(conn, artist_id))
+    eng = blowup.from_engagement(
+        db.own_posts(conn, artist_id), joined=db.joined_at(conn, artist_id)
+    )
     conn.execute("DELETE FROM blowups WHERE artist_id = ?", (artist_id,))
     parts = []
     if fol:
@@ -231,6 +238,7 @@ def analyze_artist(conn, artist_id, username, always_print=False):
         parts.append(
             f"followers {_fmt(fol['before'])} -> {_fmt(fol['after'])} "
             f"between {fol['start_at'][:7]} and {fol['end_at'][:7]}"
+            + _flags(fol)
         )
     if eng:
         db.save_blowup(conn, artist_id, "engagement", eng)
@@ -238,6 +246,7 @@ def analyze_artist(conn, artist_id, username, always_print=False):
         parts.append(
             f"likes {_fmt(eng['before'])} -> {_fmt(eng['after'])} from "
             f"{eng['start_at']}, trigger {url} ({eng['trigger_ratio']}x)"
+            + _flags(eng)
         )
     if parts or always_print:
         print(f"@{username}: " + ("; ".join(parts) or "no clear blow-up"))

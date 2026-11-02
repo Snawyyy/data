@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS blowups (
     multiplier      REAL,
     trigger_tweet_id TEXT,
     trigger_ratio   REAL,
+    -- data starts too late to be sure this was the real take-off
+    cut_off         INTEGER NOT NULL DEFAULT 0,
+    -- follower window too long to pinpoint anything
+    coarse          INTEGER NOT NULL DEFAULT 0,
     computed_at     TEXT NOT NULL,
     PRIMARY KEY (artist_id, method)
 );
@@ -95,6 +99,10 @@ CREATE TABLE IF NOT EXISTS candidates (
 LATE_COLUMNS = {
     "artists": ("found_via TEXT", "expanded_at TEXT"),
     "snapshots": ("source TEXT NOT NULL DEFAULT 'live'",),
+    "blowups": (
+        "cut_off INTEGER NOT NULL DEFAULT 0",
+        "coarse INTEGER NOT NULL DEFAULT 0",
+    ),
 }
 
 
@@ -242,6 +250,13 @@ def follower_history(conn, artist_id):
     ]
 
 
+def joined_at(conn, artist_id):
+    row = conn.execute(
+        "SELECT created_at FROM artists WHERE id = ?", (artist_id,)
+    ).fetchone()
+    return row["created_at"] if row else None
+
+
 def own_posts(conn, artist_id):
     """(created_at, likes, tweet_id) for original posts, oldest first."""
     return [
@@ -260,12 +275,14 @@ def save_blowup(conn, artist_id, method, result):
         """
         INSERT OR REPLACE INTO blowups (artist_id, method, start_at, end_at,
             before_value, after_value, multiplier, trigger_tweet_id,
-            trigger_ratio, computed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            trigger_ratio, cut_off, coarse, computed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             artist_id, method, result["start_at"], result["end_at"],
             result["before"], result["after"], result["multiplier"],
-            result.get("trigger_tweet_id"), result.get("trigger_ratio"), now_iso(),
+            result.get("trigger_tweet_id"), result.get("trigger_ratio"),
+            int(result.get("cut_off", False)), int(result.get("coarse", False)),
+            now_iso(),
         ),
     )
